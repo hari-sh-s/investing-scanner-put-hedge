@@ -1121,14 +1121,7 @@ class PortfolioEngine:
             return cash, {}, 0.0
 
         cost = n_lots * lot_size * put_premium
-        # Trim if insufficient cash
-        while cost > cash and n_lots > 0:
-            n_lots -= 1
-            cost = n_lots * lot_size * put_premium
 
-        if n_lots <= 0:
-            print(f"[PUT HEDGE] Insufficient cash (₹{cash:.0f}) for hedge.")
-            return cash, {}, 0.0
 
         cash -= cost
         self.trades.append({

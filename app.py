@@ -526,10 +526,10 @@ with main_tabs[0]:
                         )
                     with ph_col2:
                         keep_stocks = st.checkbox(
-                            "Keep Stocks + Add Puts",
+                            "Keep Stocks (Uncheck for Cash+Uncorrelated)",
                             value=saved_phc.get('keep_stocks', True),
                             key="put_hedge_keep_stocks",
-                            help="Checked: hold stocks AND buy puts (insurance). Unchecked: sell stocks, use cash for puts."
+                            help="Checked: hold stocks AND buy puts. Unchecked: Go to Cash + Uncorrelated assets AND buy puts."
                         )
                         
                     ph_col3, ph_col4 = st.columns(2)

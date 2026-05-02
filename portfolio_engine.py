@@ -1737,9 +1737,14 @@ class PortfolioEngine:
                             stocks_target     = investable_capital
                             uncorrelated_target = 0.0
                         else:
-                            # Sell stocks, use capital to buy puts (handled below)
+                            # Sell stocks, use capital to buy puts + uncorrelated
                             stocks_target     = 0.0
-                            uncorrelated_target = 0.0
+                            if uncorrelated_config:
+                                total_alloc = uncorrelated_config.get('total_pct', uncorrelated_config.get('allocation_pct', 100))
+                                allocation_pct = total_alloc / 100.0
+                                uncorrelated_target = investable_capital * allocation_pct
+                            else:
+                                uncorrelated_target = 0.0
 
                         # Buy puts if we don't already have an open hedge
                         if not put_hedge_position:

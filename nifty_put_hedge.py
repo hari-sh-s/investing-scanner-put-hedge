@@ -198,13 +198,23 @@ def get_put_premium_on_date(dt: pd.Timestamp, put_df: pd.DataFrame) -> float:
 # ─── Dhan Rolling Options API ─────────────────────────────────────────────────
 
 def _parse_rolling_response(response_data: dict) -> pd.DataFrame:
-    """Parse Dhan rolling options API response into daily OHLCIV DataFrame."""
+    """Parse Dhan rolling options API response into daily OHLCIV DataFrame.
+    Response structure: {"data": {"pe": {"open":[], "close":[], ... "timestamp":[]}}}
+    """
     data = response_data.get("data", {})
     if not data:
+        print("[PUT HEDGE] API response has no 'data' key")
         return pd.DataFrame()
 
-    timestamps = data.get("timestamp", [])
+    # The response nests under 'pe' for PUT options
+    pe_data = data.get("pe", {})
+    if not pe_data:
+        print("[PUT HEDGE] API response has no 'pe' key — full response keys:", list(data.keys()))
+        return pd.DataFrame()
+
+    timestamps = pe_data.get("timestamp", [])
     if not timestamps:
+        print("[PUT HEDGE] No timestamps in API response")
         return pd.DataFrame()
 
     records = []
@@ -215,7 +225,7 @@ def _parse_rolling_response(response_data: dict) -> pd.DataFrame:
             continue
 
         def _get(key, default=0):
-            arr = data.get(key, [])
+            arr = pe_data.get(key, [])
             return arr[i] if i < len(arr) else default
 
         records.append({
@@ -227,7 +237,7 @@ def _parse_rolling_response(response_data: dict) -> pd.DataFrame:
             "Volume": int(_get("volume")),
             "OI":     int(_get("oi")),
             "IV":     float(_get("iv")),
-            "Spot":   float(_get("underlying_spot_price", _get("spot", 0))),
+            "Spot":   float(_get("spot")),
         })
 
     if not records:
@@ -236,7 +246,7 @@ def _parse_rolling_response(response_data: dict) -> pd.DataFrame:
     df = pd.DataFrame(records).set_index("Date")
     df.index = pd.to_datetime(df.index)
 
-    # Resample minute data → daily OHLCV
+    # Resample minute data -> daily OHLCV
     daily = df.resample("D").agg({
         "Open":   "first",
         "High":   "max",
@@ -256,30 +266,40 @@ def _parse_rolling_response(response_data: dict) -> pd.DataFrame:
 
 
 def _fetch_chunk(dhan_client, from_dt: date, to_dt: date, expiry_type="WEEKLY") -> pd.DataFrame:
-    """Fetch one ≤30-day chunk of NIFTY ATM weekly put data."""
+    """Fetch one <=30-day chunk of NIFTY ATM put data."""
+    # Map our expiry_type to Dhan's expiryFlag (WEEK/MONTH) and expiryCode
+    expiry_flag = "WEEK" if expiry_type == "WEEKLY" else "MONTH"
+    expiry_code = 1  # nearest expiry
+
     # Try SDK method first
     if dhan_client is not None:
         try:
             resp = dhan_client.rolling_options_data(
-                exchange_segment="NSE_FNO",
+                exchangeSegment="NSE_FNO",
+                interval="1",
+                securityId="13",
                 instrument="OPTIDX",
+                expiryFlag=expiry_flag,
+                expiryCode=expiry_code,
+                strike="ATM",
                 drvOptionType="PUT",
+                requiredData=["open", "high", "low", "close", "iv", "volume", "oi", "spot"],
                 fromDate=from_dt.strftime("%Y-%m-%d"),
                 toDate=to_dt.strftime("%Y-%m-%d"),
-                strike="ATM",
-                expiryType=expiry_type,
             )
             if isinstance(resp, dict) and resp.get("status") == "success":
+                return _parse_rolling_response(resp)
+            elif isinstance(resp, dict) and "data" in resp:
                 return _parse_rolling_response(resp)
         except Exception as e:
             print(f"[PUT HEDGE] SDK call failed ({e}), trying direct REST...")
 
     # Direct REST fallback
-    return _fetch_chunk_rest(from_dt, to_dt)
+    return _fetch_chunk_rest(from_dt, to_dt, expiry_type=expiry_type)
 
 
 def _fetch_chunk_rest(from_dt: date, to_dt: date, expiry_type="WEEKLY") -> pd.DataFrame:
-    """Direct REST call to Dhan Rolling Options endpoint."""
+    """Direct REST call to Dhan Rolling Options endpoint with correct payload."""
     try:
         from config import get_saved_credentials
         creds = get_saved_credentials()
@@ -289,29 +309,40 @@ def _fetch_chunk_rest(from_dt: date, to_dt: date, expiry_type="WEEKLY") -> pd.Da
         return pd.DataFrame()
 
     if not cid or not token:
+        print("[PUT HEDGE] No Dhan credentials found for REST call")
         return pd.DataFrame()
+
+    # Map to Dhan API values
+    expiry_flag = "WEEK" if expiry_type == "WEEKLY" else "MONTH"
 
     headers = {
         "access-token": token,
         "client-id":    cid,
         "Content-Type": "application/json",
+        "Accept":       "application/json",
     }
     payload = {
         "exchangeSegment": "NSE_FNO",
+        "interval":        "1",
+        "securityId":      "13",      # NIFTY security ID
         "instrument":      "OPTIDX",
+        "expiryFlag":      expiry_flag,
+        "expiryCode":      1,         # nearest expiry
+        "strike":          "ATM",
         "drvOptionType":   "PUT",
+        "requiredData":    ["open", "high", "low", "close", "iv", "volume", "oi", "spot"],
         "fromDate":        from_dt.strftime("%Y-%m-%d"),
         "toDate":          to_dt.strftime("%Y-%m-%d"),
-        "strike":          "ATM",
-        "expiryType":      expiry_type,
     }
 
     try:
+        print(f"[PUT HEDGE] REST call: {from_dt} -> {to_dt} | expiryFlag={expiry_flag}")
         resp = requests.post(DHAN_ROLLING_OPTIONS_URL, json=payload, headers=headers, timeout=30)
+        print(f"[PUT HEDGE] REST status: {resp.status_code}")
         if resp.status_code == 200:
             return _parse_rolling_response(resp.json())
         else:
-            print(f"[PUT HEDGE] REST {resp.status_code}: {resp.text[:200]}")
+            print(f"[PUT HEDGE] REST error {resp.status_code}: {resp.text[:400]}")
     except Exception as e:
         print(f"[PUT HEDGE] REST request failed: {e}")
 

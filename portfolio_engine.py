@@ -1065,7 +1065,7 @@ class PortfolioEngine:
         from nifty_put_hedge import (
             get_put_premium_on_date, get_nifty_spot_on_date,
             get_atm_strike, get_next_expiry, get_option_ticker_name,
-            delta_neutral_lots, get_nifty_lot_size, build_fallback_put_series,
+            delta_neutral_lots, get_nifty_lot_size,
         )
 
         as_of_date   = date.date() if hasattr(date, 'date') else date
@@ -1099,14 +1099,6 @@ class PortfolioEngine:
             date if isinstance(date, pd.Timestamp) else pd.Timestamp(date),
             put_hedge_df,
         )
-
-        if put_premium <= 0:
-            # On-the-fly VIX/B-S fallback for this single date
-            fallback_df = build_fallback_put_series(as_of_date, as_of_date, expiry_type=expiry_type)
-            if fallback_df is not None and not fallback_df.empty:
-                put_premium = get_put_premium_on_date(
-                    pd.Timestamp(as_of_date), fallback_df
-                )
 
         if put_premium <= 0:
             print(f"[PUT HEDGE] No put premium for {date}. Skipping hedge.")
@@ -1163,7 +1155,7 @@ class PortfolioEngine:
         if not hedge_position:
             return 0.0
 
-        from nifty_put_hedge import get_put_premium_on_date, build_fallback_put_series
+        from nifty_put_hedge import get_put_premium_on_date
 
         n_lots        = hedge_position.get('lots', 0)
         lot_size      = hedge_position.get('lot_size', 75)
@@ -1180,13 +1172,7 @@ class PortfolioEngine:
         )
 
         if exit_premium <= 0:
-            as_of = date.date() if hasattr(date, 'date') else date
-            fallback_df = build_fallback_put_series(as_of, as_of)
-            if fallback_df is not None and not fallback_df.empty:
-                exit_premium = get_put_premium_on_date(pd.Timestamp(as_of), fallback_df)
-
-        # Puts likely decayed if market recovered → assume 30% residual
-        if exit_premium <= 0:
+            # Puts likely decayed if market recovered -> assume 30% residual
             exit_premium = entry_premium * 0.30
 
         proceeds = n_lots * lot_size * exit_premium
@@ -1343,20 +1329,19 @@ class PortfolioEngine:
             _to   = self.end_date
             try:
                 from nifty_put_hedge import load_or_build_hedge_data
-                # New signature: (from_date, to_date, use_fallback=True)
-                # No strike_offset or expiry_type — always ATM Weekly per design
                 put_hedge_df = load_or_build_hedge_data(
                     _from, _to,
-                    use_fallback=True,
+                    expiry_type=regime_config.get('put_hedge_config', {}).get('expiry_type', 'WEEKLY'),
                 )
                 if put_hedge_df is not None and not put_hedge_df.empty:
                     print(f"[PUT HEDGE] Loaded {len(put_hedge_df)} days of put data for backtest.")
                 else:
-                    print("[PUT HEDGE] No API data — VIX/B-S fallback will apply per rebalance date.")
-                    put_hedge_df = pd.DataFrame()   # Empty DF: per-date fallback still fires
+                    print("[PUT HEDGE] No data returned from Dhan API.")
+                    put_hedge_df = pd.DataFrame()
+            except RuntimeError as e:
+                raise RuntimeError(str(e))
             except Exception as e:
-                print(f"[PUT HEDGE] Failed to load hedge data: {e}. Per-date fallback will apply.")
-                put_hedge_df = pd.DataFrame()       # Empty DF, not None — allows per-date fallback
+                raise RuntimeError(f"[PUT HEDGE] Failed to load Dhan options data: {e}")
 
         # Get common date range
         all_dates = sorted(list(set().union(*[df.index for df in self.data.values()])))

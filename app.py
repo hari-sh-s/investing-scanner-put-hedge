@@ -981,18 +981,30 @@ with main_tabs[0]:
                             'universe_name': selected_universe
                         } if use_historical_universe else None
                         
-                        engine.run_rebalance_strategy(
-                            formula, 
-                            num_stocks,
-                            exit_rank,
-                            rebal_config,
-                            regime_config,
-                            uncorrelated_config,
-                            reinvest_profits,
-                            position_sizing_config,
-                            historical_universe_config=historical_universe_config,
-                            risk_config=risk_config
-                        )
+                        try:
+                            engine.run_rebalance_strategy(
+                                formula, 
+                                num_stocks,
+                                exit_rank,
+                                rebal_config,
+                                regime_config,
+                                uncorrelated_config,
+                                reinvest_profits,
+                                position_sizing_config,
+                                historical_universe_config=historical_universe_config,
+                                risk_config=risk_config
+                            )
+                        except RuntimeError as hedge_err:
+                            err_msg = str(hedge_err)
+                            if "Dhan" in err_msg or "authenticate" in err_msg.lower():
+                                st.error(
+                                    "**Dhan Auth Required for Put Hedge Backtest**\n\n"
+                                    + err_msg
+                                    + "\n\n> Go to the **Settings** tab → **Dhan Auth** section and log in before running this backtest."
+                                )
+                            else:
+                                st.error(f"Backtest error: {hedge_err}")
+                            st.stop()
                         metrics = engine.get_metrics()
                         
                         # Store in session_state so results persist across reruns (for benchmark comparison)

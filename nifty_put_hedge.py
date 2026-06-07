@@ -20,7 +20,6 @@ import math
 import requests
 import numpy as np
 import pandas as pd
-import yfinance as yf
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional, Tuple
@@ -164,26 +163,6 @@ def get_nifty_spot_on_date(dt: pd.Timestamp, put_df: pd.DataFrame = None) -> flo
         except Exception:
             pass
 
-    # YFinance fallback
-    try:
-        d = dt.date() if hasattr(dt, 'date') else dt
-        nifty = yf.download(
-            "^NSEI",
-            start=d - timedelta(days=5),
-            end=d + timedelta(days=2),
-            progress=False,
-            auto_adjust=True,
-        )
-        if not nifty.empty:
-            close = nifty['Close'].squeeze()
-            close.index = pd.to_datetime(close.index)
-            nearest = close.index.asof(dt if isinstance(dt, pd.Timestamp) else pd.Timestamp(dt))
-            if not pd.isna(nearest):
-                val = close.loc[nearest]
-                return float(val) if pd.notna(val) else 0.0
-    except Exception:
-        pass
-
     return 0.0
 
 
@@ -214,102 +193,6 @@ def get_put_premium_on_date(dt: pd.Timestamp, put_df: pd.DataFrame) -> float:
 
     return 0.0
 
-
-# ─── VIX/Black-Scholes Fallback ───────────────────────────────────────────────
-
-def _bs_atm_put(spot: float, iv_pct: float, days_to_expiry: int = 5) -> float:
-    """
-    Brenner-Subrahmanyam approximation for ATM put/call:
-        Premium ≈ Spot × σ × sqrt(T / (2π))
-    where T = days_to_expiry / 365
-    """
-    if spot <= 0 or iv_pct <= 0:
-        return 0.0
-    sigma = iv_pct / 100.0
-    T     = days_to_expiry / 365.0
-    return spot * sigma * math.sqrt(T / (2 * math.pi))
-
-
-def build_fallback_put_series(from_date, to_date, expiry_type="WEEKLY") -> pd.DataFrame:
-    """
-    Build ATM Put premium estimates using India VIX + Black-Scholes.
-    Used when Dhan API is unavailable.
-    Only builds for dates >= DATA_AVAILABLE_FROM (Jan 2020).
-    """
-    if isinstance(from_date, (datetime, pd.Timestamp)):
-        from_date = from_date.date()
-    if isinstance(to_date, (datetime, pd.Timestamp)):
-        to_date = to_date.date()
-
-    # Clamp to available range
-    from_date = max(from_date, DATA_AVAILABLE_FROM)
-    if from_date > to_date:
-        return pd.DataFrame()
-
-    print("[PUT HEDGE] Building VIX/B-S fallback estimates...")
-
-    ext_start = pd.Timestamp(from_date) - timedelta(days=30)
-    try:
-        nifty_df = yf.download("^NSEI", start=ext_start, end=pd.Timestamp(to_date) + timedelta(days=2),
-                                progress=False, auto_adjust=True)
-        if nifty_df.empty:
-            return pd.DataFrame()
-        nifty_close = nifty_df['Close'].squeeze()
-        nifty_close.index = pd.to_datetime(nifty_close.index)
-    except Exception as e:
-        print(f"[PUT HEDGE] NIFTY download failed: {e}")
-        return pd.DataFrame()
-
-    try:
-        vix = yf.download("^INDIAVIX", start=ext_start, end=pd.Timestamp(to_date) + timedelta(days=2),
-                           progress=False)
-        vix_series = vix['Close'].squeeze() if not vix.empty else pd.Series(dtype=float)
-        vix_series.index = pd.to_datetime(vix_series.index)
-    except Exception:
-        vix_series = pd.Series(dtype=float)
-
-    mask = (nifty_close.index >= pd.Timestamp(from_date)) & \
-           (nifty_close.index <= pd.Timestamp(to_date))
-    nifty_range = nifty_close[mask]
-
-    records = []
-    for dt, spot in nifty_range.items():
-        # Get IV
-        if not vix_series.empty and dt in vix_series.index:
-            iv = float(vix_series.loc[dt])
-        elif not vix_series.empty:
-            nearest = vix_series.index.asof(dt)
-            iv = float(vix_series.loc[nearest]) if not pd.isna(nearest) else 15.0
-        else:
-            iv = 15.0
-
-        expiry  = get_next_expiry(dt.date() if hasattr(dt, 'date') else dt, expiry_type)
-        dte     = max((expiry - (dt.date() if hasattr(dt, 'date') else dt)).days, 1)
-        premium = _bs_atm_put(float(spot), iv, dte)
-        strike  = get_atm_strike(float(spot))
-
-        records.append({
-            "Date":      dt,
-            "Open":      premium,
-            "High":      premium * 1.05,
-            "Low":       premium * 0.95,
-            "Close":     premium,
-            "Volume":    0,
-            "OI":        0,
-            "IV":        iv,
-            "Spot":      float(spot),
-            "Strike":    strike,
-            "Expiry":    str(expiry),
-            "Estimated": True,
-        })
-
-    if not records:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(records).set_index("Date")
-    df.index = pd.to_datetime(df.index)
-    print(f"[PUT HEDGE] Built {len(df)} rows of estimated put premiums.")
-    return df
 
 
 # ─── Dhan Rolling Options API ─────────────────────────────────────────────────
@@ -513,34 +396,32 @@ def fetch_rolling_options_data(
 
 # ─── Master Loader ────────────────────────────────────────────────────────────
 
-def load_or_build_hedge_data(from_date, to_date, expiry_type="WEEKLY", use_fallback: bool = True) -> pd.DataFrame:
+def load_or_build_hedge_data(from_date, to_date, expiry_type="WEEKLY", **kwargs):
     """
-    Try Dhan API → fall back to VIX/B-S estimates.
-    Dates before DATA_AVAILABLE_FROM are excluded.
-
-    Returns:
-        DataFrame with DatetimeIndex. Empty DataFrame if all sources fail.
+    Fetch hedge data exclusively from Dhan API.
+    Raises RuntimeError if no data is returned — the VIX/Black-Scholes fallback
+    has been removed to prevent biased backtesting.
     """
+    from datetime import date as _date
     if isinstance(from_date, (datetime, pd.Timestamp)):
         from_date = from_date.date()
     if isinstance(to_date, (datetime, pd.Timestamp)):
         to_date = to_date.date()
 
-    # Clamp range
     eff_from = max(from_date, DATA_AVAILABLE_FROM)
     if eff_from > to_date:
-        print(f"[PUT HEDGE] Date range entirely before {DATA_AVAILABLE_FROM} — no hedge data.")
-        return pd.DataFrame()
+        raise RuntimeError(
+            "Backtest date range is entirely before " + str(DATA_AVAILABLE_FROM) + ". "
+            "Dhan options data is only available from Jan 2020 onwards."
+        )
 
-    # Try API
     api_df = fetch_rolling_options_data(eff_from, to_date, expiry_type=expiry_type)
     if not api_df.empty:
         return api_df
 
-    # Fallback
-    if use_fallback:
-        print("[PUT HEDGE] Falling back to VIX/Black-Scholes estimates.")
-        return build_fallback_put_series(eff_from, to_date, expiry_type)
-
-    return pd.DataFrame()
+    raise RuntimeError(
+        "Dhan API returned no options data. "
+        "Please authenticate with Dhan before running a Put Hedge backtest. "
+        "Go to Settings > Dhan Auth and log in first."
+    )
 

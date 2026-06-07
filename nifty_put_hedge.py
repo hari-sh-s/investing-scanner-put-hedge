@@ -321,6 +321,7 @@ def _fetch_chunk_rest(from_dt: date, to_dt: date, expiry_type="WEEKLY") -> pd.Da
 def fetch_rolling_options_data(
     from_date,
     to_date,
+    expiry_type: str = "WEEKLY",
     delay_seconds: float = 0.6,
     progress_callback=None,
 ) -> pd.DataFrame:
@@ -375,7 +376,7 @@ def fetch_rolling_options_data(
         if progress_callback:
             progress_callback(i + 1, len(chunks), f"Chunk {i+1}/{len(chunks)}: {cf} → {ct}")
 
-        chunk_df = _fetch_chunk(dhan_client, cf, ct)
+        chunk_df = _fetch_chunk(dhan_client, cf, ct, expiry_type=expiry_type)
         if chunk_df is not None and not chunk_df.empty:
             all_frames.append(chunk_df)
         else:
